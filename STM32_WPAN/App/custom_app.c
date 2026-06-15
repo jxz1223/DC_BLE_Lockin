@@ -103,11 +103,19 @@ uint8_t buffer1 = 0;
 uint8_t jj=0;
 uint8_t jk=0;
 uint8_t jjk=0;
+#define LOCKIN_REF_TABLE_SIZE                 8
+#define LOCKIN_Q15_SCALE                      32768
+#define LOCKIN_ADC_MIDPOINT                   2048
+static const int16_t LockinSinQ15[LOCKIN_REF_TABLE_SIZE] = {0, 23170, 32767, 23170, 0, -23170, -32767, -23170};
+static const int16_t LockinCosQ15[LOCKIN_REF_TABLE_SIZE] = {32767, 23170, 0, -23170, -32767, -23170, 0, 23170};
+uint32_t lockin_sample_index = 0;
+uint16_t lockin_rms_value = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 /* DT_SERVICE */
 static void Custom_Tx_char_Update_Char(void);
+static void Custom_Tx_char_Send_Notification(void);
 
 /* USER CODE BEGIN PFP */
 void DDS_START(double Freq);
@@ -117,6 +125,10 @@ void ADC_START(void);
 void MM1205(void);
 static void SendData(void);
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc);
+static uint16_t Lockin_CalcRms(const uint16_t *pSamples, uint16_t length);
+static int32_t Lockin_GetCenteredSample(uint16_t adc_sample);
+static void Lockin_FillRmsFrame(uint16_t rms_value);
+static uint64_t IntSqrt64(uint64_t value);
 /* USER CODE END PFP */
 
 /* Functions Definition ------------------------------------------------------*/
@@ -241,6 +253,26 @@ __USED void Custom_Tx_char_Update_Char(void) /* Property Read */
   /* USER CODE BEGIN Tx_char_UC_Last*/
 
   /* USER CODE END Tx_char_UC_Last*/
+  return;
+}
+
+void Custom_Tx_char_Send_Notification(void) /* Property Notification */
+{
+  uint8_t updateflag = 0;
+
+  /* USER CODE BEGIN Tx_char_NS_1*/
+  updateflag=Custom_App_Context.Tx_char_Notification_Status;
+  /* USER CODE END Tx_char_NS_1*/
+
+  if (updateflag != 0)
+  {
+	Custom_STM_App_Update_Char_Ext(Connection_Handle, CUSTOM_STM_TX_CHAR, (uint8_t *)NotifyCharData);
+  }
+
+  /* USER CODE BEGIN Tx_char_NS_Last*/
+
+  /* USER CODE END Tx_char_NS_Last*/
+
   return;
 }
 
@@ -484,8 +516,6 @@ void SendData( void )
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
-	uint32_t i = 0;
-
 	jj=jj+1;
 	if (jj>20)
 	{
@@ -510,43 +540,109 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
   ubDmaTransferStatus = 1;
 		if	(buffer1==0)
 		{
-			//for (i=0; i < ADC_CONVERTED_DATA_BUFFER_SIZE; i++)
-			for (i = (ADC_CONVERTED_DATA_BUFFER_SIZE/2); i < ADC_CONVERTED_DATA_BUFFER_SIZE; i++)
-			{
-				NotifyCharData[i*2+3] = (uint8_t)(aADCxConvertedData[i]>>8);
-				NotifyCharData[i*2+1+3] = (uint8_t)(aADCxConvertedData[i]);
-			}
-			/*UPDATE*/
+			lockin_rms_value = Lockin_CalcRms((const uint16_t *)aADCxConvertedData, ADC_CONVERTED_DATA_BUFFER_SIZE);
+			Lockin_FillRmsFrame(lockin_rms_value);
 			buffer1 = 1;
 		}
 }
 
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
-	//uint32_t tmp_index = 0;
-	uint32_t i = 0;
-//
-//  /* Computation of ADC conversions raw data to physical values               */
-//  /* using LL ADC driver helper macro.                                        */
-//  /* Management of the 1st half of the buffer */
-  //for (tmp_index = 0; tmp_index < (ADC_CONVERTED_DATA_BUFFER_SIZE/2); tmp_index++)
-  //{
-    //aADCxConvertedData_Voltage_mVolt[tmp_index] = __ADC_CALC_DATA_VOLTAGE(VDDA_APPLI, aADCxConvertedData[tmp_index]);
-  //}
-  if	(buffer1==0)
-  		{
-  			//for (i=0; i < ADC_CONVERTED_DATA_BUFFER_SIZE; i++)
-  			for (i =0; i < (ADC_CONVERTED_DATA_BUFFER_SIZE/2); i++)
-  			{
-  				NotifyCharData[i*2+3] = (uint8_t)(aADCxConvertedData[i]>>8);
-  				NotifyCharData[i*2+1+3] = (uint8_t)(aADCxConvertedData[i]);
-  				//Notification_Data_Buffer1[i] = aADCxConvertedData[i];
-  			}
-  		}
-
   /* Update status variable of DMA transfer */
 	//Error_Handler();
   ubDmaTransferStatus = 0;
+}
+
+static uint16_t Lockin_CalcRms(const uint16_t *pSamples, uint16_t length)
+{
+  int64_t sum_sin_q15 = 0;
+  int64_t sum_cos_q15 = 0;
+  uint16_t i;
+
+  if (length == 0U)
+  {
+    return 0;
+  }
+
+  for (i = 0U; i < length; i++)
+  {
+    uint8_t ref_index = (uint8_t)((lockin_sample_index + i) & (LOCKIN_REF_TABLE_SIZE - 1U));
+    int32_t sample = Lockin_GetCenteredSample(pSamples[i]);
+
+    sum_sin_q15 += (int64_t)sample * LockinSinQ15[ref_index];
+    sum_cos_q15 += (int64_t)sample * LockinCosQ15[ref_index];
+  }
+
+  lockin_sample_index = (lockin_sample_index + length) & (LOCKIN_REF_TABLE_SIZE - 1U);
+
+  /*
+   * For x=A*sin(wt+phi), the lock-in DC terms are A/2 on I/Q.
+   * RMS = A/sqrt(2) = sqrt(2 * (I^2 + Q^2)).
+   */
+  int64_t mean_sin_q15 = sum_sin_q15 / length;
+  int64_t mean_cos_q15 = sum_cos_q15 / length;
+  uint64_t power_q30 = 2ULL * ((uint64_t)(mean_sin_q15 * mean_sin_q15) +
+                               (uint64_t)(mean_cos_q15 * mean_cos_q15));
+  uint32_t rms = (uint32_t)((IntSqrt64(power_q30) + (LOCKIN_Q15_SCALE / 2U)) /
+                            LOCKIN_Q15_SCALE);
+
+  if (rms > 0xFFFFU)
+  {
+    rms = 0xFFFFU;
+  }
+
+  return (uint16_t)rms;
+}
+
+static int32_t Lockin_GetCenteredSample(uint16_t adc_sample)
+{
+  return (int32_t)adc_sample - (int32_t)LOCKIN_ADC_MIDPOINT;
+}
+
+static void Lockin_FillRmsFrame(uint16_t rms_value)
+{
+  uint16_t i;
+
+  NotifyCharData[0] = (uint8_t)(0x8F);
+  NotifyCharData[1] = (uint8_t)(0x8E);
+  NotifyCharData[2] = (uint8_t)(0x8F);
+
+  for (i = 0U; i < ADC_CONVERTED_DATA_BUFFER_SIZE; i++)
+  {
+    NotifyCharData[i * 2U + 3U] = (uint8_t)(rms_value >> 8);
+    NotifyCharData[i * 2U + 4U] = (uint8_t)(rms_value);
+  }
+
+  NotifyCharData[243] = (uint8_t)(0x8E);
+  NotifyCharData[244] = (uint8_t)(0x8F);
+  NotifyCharData[245] = (uint8_t)(0x8E);
+}
+
+static uint64_t IntSqrt64(uint64_t value)
+{
+  uint64_t bit = 1ULL << 62;
+  uint64_t result = 0;
+
+  while (bit > value)
+  {
+    bit >>= 2;
+  }
+
+  while (bit != 0U)
+  {
+    if (value >= result + bit)
+    {
+      value -= result + bit;
+      result = (result >> 1) + bit;
+    }
+    else
+    {
+      result >>= 1;
+    }
+    bit >>= 2;
+  }
+
+  return result;
 }
 
 
