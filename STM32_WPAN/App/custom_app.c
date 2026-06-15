@@ -108,7 +108,6 @@ uint8_t jjk=0;
 /* Private function prototypes -----------------------------------------------*/
 /* DT_SERVICE */
 static void Custom_Tx_char_Update_Char(void);
-static void Custom_Tx_char_Send_Notification(void);
 
 /* USER CODE BEGIN PFP */
 void DDS_START(double Freq);
@@ -242,26 +241,6 @@ __USED void Custom_Tx_char_Update_Char(void) /* Property Read */
   /* USER CODE BEGIN Tx_char_UC_Last*/
 
   /* USER CODE END Tx_char_UC_Last*/
-  return;
-}
-
-void Custom_Tx_char_Send_Notification(void) /* Property Notification */
-{
-  uint8_t updateflag = 0;
-
-  /* USER CODE BEGIN Tx_char_NS_1*/
-  updateflag=Custom_App_Context.Tx_char_Notification_Status;
-  /* USER CODE END Tx_char_NS_1*/
-
-  if (updateflag != 0)
-  {
-	Custom_STM_App_Update_Char_Ext(Connection_Handle, CUSTOM_STM_TX_CHAR, (uint8_t *)NotifyCharData);
-  }
-
-  /* USER CODE BEGIN Tx_char_NS_Last*/
-
-  /* USER CODE END Tx_char_NS_Last*/
-
   return;
 }
 
