@@ -103,6 +103,7 @@ typedef struct
 #define SENSOR_EVT_SCAN_BEGIN           0x90U
 #define SENSOR_EVT_SCAN_POINTS          0x91U
 #define SENSOR_EVT_SCAN_END             0x92U
+#define SENSOR_EVT_SENSOR_READINGS      0x93U
 #define SENSOR_EVT_BLE_RAW              0xA0U
 
 #define SENSOR_STATUS_OK                0x00U
@@ -117,6 +118,8 @@ typedef struct
 #define SENSOR_SCAN_DEFAULT_SETTLE_MS   20U
 #define SENSOR_SCAN_MAX_SETTLE_MS       80U
 #define SENSOR_SCAN_MAX_AVG_BLOCKS      16U
+#define SENSOR_READING_ITEMS_PER_FRAME  1U
+#define SENSOR_READING_ITEM_SIZE        8U
 
 #define SENSOR_DAC_STORE_MAGIC          0xDAC05A5AU
 #define SENSOR_APP_FLASH_SIZE           (512U * 1024U)
@@ -168,6 +171,8 @@ static Sensor_ScanContext_t SensorScan;
 static uint16_t SensorCurrentDac = 0U;
 static uint8_t SensorNotifyReady = 0U;
 static uint8_t SensorTxFrame[SENSOR_PROTOCOL_MAX_FRAME];
+static uint16_t SensorReadingSeq = 0U;
+static uint16_t SensorLatestAdcSample = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -195,6 +200,7 @@ static tBleStatus Sensor_SendFrame(uint8_t type, uint8_t flags, uint16_t scan_id
 static void Sensor_SendDiag(const char *text);
 static void Sensor_SendAck(uint8_t type, uint16_t scan_id, uint16_t seq, uint8_t status);
 static void Sensor_SendNack(uint8_t type, uint16_t scan_id, uint16_t seq, uint8_t status);
+static tBleStatus Sensor_SendReadingFrame(void);
 static uint16_t Sensor_Crc16Ccitt(const uint8_t *data, uint16_t length);
 static uint16_t Sensor_ReadLe16(const uint8_t *payload);
 static void Sensor_WriteLe16(uint8_t *payload, uint16_t value);
@@ -224,9 +230,7 @@ void Custom_STM_App_Notification(Custom_STM_App_Notification_evt_t *pNotificatio
       SensorNotifyReady = 1U;
       BSP_LED_On(LED_GREEN);
       Sensor_SendDiag("SENSOR_NOTIFY_ENABLED");
-#if (SENSOR_LEGACY_STREAM_ENABLED != 0U)
     	UTIL_SEQ_SetTask(1 << CFG_TASK_DATA_TRANSFER_UPDATE_ID, CFG_SCH_PRIO_0);
-#endif
       /* USER CODE END CUSTOM_STM_TX_CHAR_NOTIFY_ENABLED_EVT */
       break;
 
@@ -248,7 +252,7 @@ void Custom_STM_App_Notification(Custom_STM_App_Notification_evt_t *pNotificatio
 
     case CUSTOM_STM_NOTIFICATION_COMPLETE_EVT:
       /* USER CODE BEGIN CUSTOM_STM_NOTIFICATION_COMPLETE_EVT */
-
+      UTIL_SEQ_SetTask(1 << CFG_TASK_DATA_TRANSFER_UPDATE_ID, CFG_SCH_PRIO_0);
       /* USER CODE END CUSTOM_STM_NOTIFICATION_COMPLETE_EVT */
       break;
 
@@ -610,6 +614,33 @@ void SendData( void )
 		}
   }
 #endif
+  if ((SensorNotifyReady != 0U) &&
+      (Custom_App_Context.Tx_char_Notification_Status == 1U) &&
+      (buffer1 == 1U))
+  {
+    tBleStatus status;
+
+    kk=kk+1;
+    if (kk==20)
+    {
+      BSP_LED_On(LED_BLUE);
+    }
+    if (kk==40)
+    {
+      BSP_LED_Off(LED_BLUE);
+      kk=0;
+    }
+
+    status = Sensor_SendReadingFrame();
+    if (status == BLE_STATUS_SUCCESS)
+    {
+      buffer1 = 0U;
+    }
+    else if (status == BLE_STATUS_INSUFFICIENT_RESOURCES)
+    {
+      Custom_App_Context.Tx_char_Notification_Status = 0U;
+    }
+  }
   return;
 }
 
@@ -640,8 +671,10 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 		if	(buffer1==0)
 		{
 			lockin_rms_value = Lockin_CalcRms((const uint16_t *)aADCxConvertedData, ADC_CONVERTED_DATA_BUFFER_SIZE);
+			SensorLatestAdcSample = aADCxConvertedData[ADC_CONVERTED_DATA_BUFFER_SIZE - 1U];
 			Lockin_FillRmsFrame(lockin_rms_value);
 			buffer1 = 1;
+			UTIL_SEQ_SetTask(1 << CFG_TASK_DATA_TRANSFER_UPDATE_ID, CFG_SCH_PRIO_0);
 		}
 }
 
@@ -1092,6 +1125,26 @@ static void Sensor_SendNack(uint8_t type, uint16_t scan_id, uint16_t seq, uint8_
   payload[0] = type;
   payload[1] = status;
   (void)Sensor_SendFrame(SENSOR_EVT_NACK, 0U, scan_id, seq, payload, sizeof(payload));
+}
+
+static tBleStatus Sensor_SendReadingFrame(void)
+{
+  uint8_t payload[1U + (SENSOR_READING_ITEMS_PER_FRAME * SENSOR_READING_ITEM_SIZE)];
+  uint8_t offset = 1U;
+  uint16_t seq = SensorReadingSeq++;
+
+  payload[0] = SENSOR_READING_ITEMS_PER_FRAME;
+  Sensor_WriteLe16(&payload[offset], seq);
+  Sensor_WriteLe16(&payload[offset + 2U], SensorCurrentDac);
+  Sensor_WriteLe16(&payload[offset + 4U], lockin_rms_value);
+  Sensor_WriteLe16(&payload[offset + 6U], SensorLatestAdcSample);
+
+  return Sensor_SendFrame(SENSOR_EVT_SENSOR_READINGS,
+                          0U,
+                          0U,
+                          seq,
+                          payload,
+                          sizeof(payload));
 }
 
 static uint16_t Sensor_Crc16Ccitt(const uint8_t *data, uint16_t length)
