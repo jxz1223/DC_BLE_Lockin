@@ -30,6 +30,7 @@
 typedef struct{
   uint16_t  CustomDt_ServHdle;                    /**< DT_SERVICE handle */
   uint16_t  CustomTx_CharHdle;                  /**< DT_TX_CHAR handle */
+  uint16_t  CustomRx_CharHdle;                  /**< DT_RX_CHAR handle */
 /* USER CODE BEGIN Context */
   /* Place holder for Characteristic Descriptors Handle*/
 
@@ -65,6 +66,7 @@ extern uint16_t Connection_Handle;
 
 /* Private variables ---------------------------------------------------------*/
 uint16_t SizeTx_Char = 246;
+uint16_t SizeRx_Char = 246;
 
 /**
  * START of Section BLE_DRIVER_CONTEXT
@@ -105,6 +107,7 @@ do {\
 
 #define COPY_DT_SERVICE_UUID(uuid_struct)          COPY_UUID_128(uuid_struct,0x00,0x00,0xfe,0x80,0xcc,0x7a,0x48,0x2a,0x98,0x4a,0x7f,0x2e,0xd5,0xb3,0xe5,0x8f)
 #define COPY_DT_TX_CHAR_UUID(uuid_struct)    COPY_UUID_128(uuid_struct,0x00,0x00,0xfe,0x81,0x8e,0x22,0x45,0x41,0x9d,0x4c,0x21,0xed,0xae,0x82,0xed,0x19)
+#define COPY_DT_RX_CHAR_UUID(uuid_struct)    COPY_UUID_128(uuid_struct,0x00,0x00,0xfe,0x82,0x8e,0x22,0x45,0x41,0x9d,0x4c,0x21,0xed,0xae,0x82,0xed,0x19)
 
 /* USER CODE BEGIN PF */
 
@@ -188,6 +191,17 @@ static SVCCTL_EvtAckStatus_t Custom_STM_Event_Handler(void *Event)
               break;
             }
           }  /* if (attribute_modified->Attr_Handle == (CustomContext.CustomTx_CharHdle + CHARACTERISTIC_DESCRIPTOR_ATTRIBUTE_OFFSET))*/
+
+          if (attribute_modified->Attr_Handle == (CustomContext.CustomRx_CharHdle + CHARACTERISTIC_VALUE_ATTRIBUTE_OFFSET))
+          {
+            return_value = SVCCTL_EvtAckFlowEnable;
+            Notification.Custom_Evt_Opcode = CUSTOM_STM_RX_CHAR_WRITE_EVT;
+            Notification.DataTransfered.pPayload = attribute_modified->Attr_Data;
+            Notification.DataTransfered.Length = attribute_modified->Attr_Data_Length;
+            Notification.ConnectionHandle = attribute_modified->Connection_Handle;
+            Notification.AttrHandle = attribute_modified->Attr_Handle;
+            Custom_STM_App_Notification(&Notification);
+          }
 
           /* USER CODE BEGIN EVT_BLUE_GATT_ATTRIBUTE_MODIFIED_END */
 
@@ -302,12 +316,13 @@ void SVCCTL_InitCustomSvc(void)
    * service_max_attribute_record = 1 for DT_SERVICE +
    *                                2 for DT_TX_CHAR +
    *                                1 for DT_TX_CHAR configuration descriptor +
-   *                              = 4
+   *                                2 for DT_RX_CHAR +
+   *                              = 6
    *
    * This value doesn't take into account number of descriptors manually added
    * In case of descriptors added, please update the max_attr_record value accordingly in the next SVCCTL_InitService User Section
    */
-  max_attr_record = 4;
+  max_attr_record = 6;
 
   /* USER CODE BEGIN SVCCTL_InitService */
   /* max_attr_record to be updated if descriptors have been added */
@@ -355,6 +370,28 @@ void SVCCTL_InitCustomSvc(void)
   /* Place holder for Characteristic Descriptors */
 
   /* USER CODE END SVCCTL_Init_Service1_Char1 */
+
+  /**
+   *  DT_RX_CHAR
+   */
+  COPY_DT_RX_CHAR_UUID(uuid.Char_UUID_128);
+  ret = aci_gatt_add_char(CustomContext.CustomDt_ServHdle,
+                          UUID_TYPE_128, &uuid,
+                          SizeRx_Char,
+                          (CHAR_PROP_WRITE | CHAR_PROP_WRITE_WITHOUT_RESP),
+                          ATTR_PERMISSION_NONE,
+                          GATT_NOTIFY_ATTRIBUTE_WRITE,
+                          0x10,
+                          CHAR_VALUE_LEN_VARIABLE,
+                          &(CustomContext.CustomRx_CharHdle));
+  if (ret != BLE_STATUS_SUCCESS)
+  {
+    APP_DBG_MSG("  Fail   : aci_gatt_add_char command   : RX_CHAR, error code: 0x%x \n\r", ret);
+  }
+  else
+  {
+    APP_DBG_MSG("  Success: aci_gatt_add_char command   : RX_CHAR \n\r");
+  }
 
   /* USER CODE BEGIN SVCCTL_InitCustomSvc_2 */
 
