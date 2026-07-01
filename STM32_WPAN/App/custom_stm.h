@@ -36,6 +36,7 @@ typedef enum
 {
   /* DT_SERVICE */
   CUSTOM_STM_TX_CHAR,
+  CUSTOM_STM_RX_CHAR,
 } Custom_STM_Char_Opcode_t;
 
 typedef enum
@@ -43,6 +44,8 @@ typedef enum
   /* DT_TX_CHAR */
   CUSTOM_STM_TX_CHAR_NOTIFY_ENABLED_EVT,
   CUSTOM_STM_TX_CHAR_NOTIFY_DISABLED_EVT,
+  /* DT_RX_CHAR */
+  CUSTOM_STM_RX_CHAR_WRITE_EVT,
   CUSTOM_STM_NOTIFICATION_COMPLETE_EVT,
 
   CUSTOM_STM_BOOT_REQUEST_EVT
@@ -70,6 +73,7 @@ typedef struct
 
 /* Exported constants --------------------------------------------------------*/
 extern uint16_t SizeTx_Char;
+extern uint16_t SizeRx_Char;
 
 /* USER CODE BEGIN EC */
 
