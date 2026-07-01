@@ -118,6 +118,7 @@ typedef struct
 #define SENSOR_SCAN_DEFAULT_SETTLE_MS   20U
 #define SENSOR_SCAN_MAX_SETTLE_MS       80U
 #define SENSOR_SCAN_MAX_AVG_BLOCKS      16U
+#define SENSOR_LOCKIN_WAIT_TIMEOUT_MS   40U
 #define SENSOR_READING_ITEMS_PER_FRAME  1U
 #define SENSOR_READING_ITEM_SIZE        8U
 
@@ -156,7 +157,7 @@ uint16_t   aADCxConvertedData_Voltage_mVolt[ADC_CONVERTED_DATA_BUFFER_SIZE];  /*
 __IO   uint8_t ubDmaTransferStatus = 2; /* Variable set into DMA interruption callback */
 uint16_t kk;
 uint16_t Att_Mtu_Exchanged;
-uint8_t buffer1 = 0;
+__IO uint8_t buffer1 = 0;
 uint8_t jj=0;
 uint8_t jk=0;
 uint8_t jjk=0;
@@ -166,13 +167,14 @@ uint8_t jjk=0;
 static const int16_t LockinSinQ15[LOCKIN_REF_TABLE_SIZE] = {0, 23170, 32767, 23170, 0, -23170, -32767, -23170};
 static const int16_t LockinCosQ15[LOCKIN_REF_TABLE_SIZE] = {32767, 23170, 0, -23170, -32767, -23170, 0, 23170};
 uint32_t lockin_sample_index = 0;
-uint16_t lockin_rms_value = 0;
+__IO uint16_t lockin_rms_value = 0;
 static Sensor_ScanContext_t SensorScan;
 static uint16_t SensorCurrentDac = 0U;
 static uint8_t SensorNotifyReady = 0U;
 static uint8_t SensorTxFrame[SENSOR_PROTOCOL_MAX_FRAME];
 static uint16_t SensorReadingSeq = 0U;
-static uint16_t SensorLatestAdcSample = 0U;
+static __IO uint16_t SensorLatestAdcSample = 0U;
+static __IO uint32_t SensorLockinSeq = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -206,6 +208,7 @@ static uint16_t Sensor_ReadLe16(const uint8_t *payload);
 static void Sensor_WriteLe16(uint8_t *payload, uint16_t value);
 static uint16_t Sensor_InterpolateDac(uint16_t index);
 static uint16_t Sensor_ReadLockinAverage(uint8_t avg_blocks);
+static uint16_t Sensor_WaitNextLockinValue(uint32_t *pLastSeq);
 static void Sensor_DacApply(uint16_t dac_code);
 static uint16_t Sensor_DacLoadSaved(uint16_t fallback);
 static uint8_t Sensor_DacSave(uint16_t dac_code);
@@ -668,14 +671,12 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
   //}
 	  /* Update status variable of DMA transfer */
   ubDmaTransferStatus = 1;
-		if	(buffer1==0)
-		{
-			lockin_rms_value = Lockin_CalcRms((const uint16_t *)aADCxConvertedData, ADC_CONVERTED_DATA_BUFFER_SIZE);
-			SensorLatestAdcSample = aADCxConvertedData[ADC_CONVERTED_DATA_BUFFER_SIZE - 1U];
-			Lockin_FillRmsFrame(lockin_rms_value);
-			buffer1 = 1;
-			UTIL_SEQ_SetTask(1 << CFG_TASK_DATA_TRANSFER_UPDATE_ID, CFG_SCH_PRIO_0);
-		}
+  lockin_rms_value = Lockin_CalcRms((const uint16_t *)aADCxConvertedData, ADC_CONVERTED_DATA_BUFFER_SIZE);
+  SensorLatestAdcSample = aADCxConvertedData[ADC_CONVERTED_DATA_BUFFER_SIZE - 1U];
+  SensorLockinSeq++;
+  Lockin_FillRmsFrame(lockin_rms_value);
+  buffer1 = 1U;
+  UTIL_SEQ_SetTask(1 << CFG_TASK_DATA_TRANSFER_UPDATE_ID, CFG_SCH_PRIO_0);
 }
 
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
@@ -1201,18 +1202,45 @@ static uint16_t Sensor_InterpolateDac(uint16_t index)
 static uint16_t Sensor_ReadLockinAverage(uint8_t avg_blocks)
 {
   uint32_t sum = 0U;
+  uint32_t last_seq;
   uint8_t i;
 
+  if (avg_blocks == 0U)
+  {
+    avg_blocks = 1U;
+  }
+
+  last_seq = SensorLockinSeq;
   for (i = 0U; i < avg_blocks; i++)
   {
-    sum += lockin_rms_value;
-    if (avg_blocks > 1U)
-    {
-      HAL_Delay(1U);
-    }
+    sum += Sensor_WaitNextLockinValue(&last_seq);
   }
 
   return (uint16_t)(sum / avg_blocks);
+}
+
+static uint16_t Sensor_WaitNextLockinValue(uint32_t *pLastSeq)
+{
+  uint32_t start_tick;
+  uint32_t last_seq;
+
+  if (pLastSeq == 0)
+  {
+    return lockin_rms_value;
+  }
+
+  last_seq = *pLastSeq;
+  start_tick = HAL_GetTick();
+  while (SensorLockinSeq == last_seq)
+  {
+    if ((HAL_GetTick() - start_tick) >= SENSOR_LOCKIN_WAIT_TIMEOUT_MS)
+    {
+      break;
+    }
+  }
+
+  *pLastSeq = SensorLockinSeq;
+  return lockin_rms_value;
 }
 
 static void Sensor_DacApply(uint16_t dac_code)

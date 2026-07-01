@@ -8,6 +8,7 @@ RelWithDebInfo/
 MinSizeRel/
 cmake-build-*/
 build_old_path_cache_*/
+DC_BLE_Lockin-*/
 
 # CMake generated files
 CMakeCache.txt
