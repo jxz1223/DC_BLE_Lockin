@@ -37,6 +37,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "hw_if.h"
 
 /* USER CODE END Includes */
 
@@ -171,6 +172,7 @@ typedef struct
 #define BD_ADDR_SIZE_LOCAL    6
 
 /* USER CODE BEGIN PD */
+#define BLE_LINK_LED_BLINK_MS          250U
 
 /* USER CODE END PD */
 
@@ -218,7 +220,7 @@ Custom_App_ConnHandle_Not_evt_t HandleNotification;
 
 #if (L2CAP_REQUEST_NEW_CONN_PARAM != 0)
 #define SIZE_TAB_CONN_INT            2
-float a_ConnInterval[SIZE_TAB_CONN_INT] = {50, 1000}; /* ms */
+float a_ConnInterval[SIZE_TAB_CONN_INT] = {30, 50}; /* ms */
 uint8_t index_con_int, mutex;
 #endif /* L2CAP_REQUEST_NEW_CONN_PARAM != 0 */
 
@@ -231,6 +233,10 @@ uint8_t a_AdvData[14] =
 };
 
 /* USER CODE BEGIN PV */
+static uint16_t SensorNodeId = 1U;
+static uint8_t BleLinkLedTimerId;
+static uint8_t BleLinkLedTimerReady = 0U;
+static uint8_t BleLinkLedBlinkEnabled = 0U;
 
 /* USER CODE END PV */
 
@@ -249,6 +255,10 @@ static void Connection_Interval_Update_Req(void);
 
 /* USER CODE BEGIN PFP */
 static void LinkConfiguration(void);
+static void BleLinkLed_StartBlink(void);
+static void BleLinkLed_SetConnected(void);
+static void BleLinkLed_Timeout(void);
+static uint32_t BleLinkLed_MsToTicks(uint32_t timeout_ms);
 /* USER CODE END PFP */
 
 /* External variables --------------------------------------------------------*/
@@ -359,6 +369,14 @@ void APP_BLE_Init(void)
   UTIL_SEQ_RegTask(1<<CFG_TASK_CONN_UPDATE_REG_ID, UTIL_SEQ_RFU, Connection_Interval_Update_Req);
 #endif /* L2CAP_REQUEST_NEW_CONN_PARAM != 0 */
   UTIL_SEQ_RegTask( 1<<CFG_TASK_LINK_CONFIG_ID, UTIL_SEQ_RFU, LinkConfiguration);
+  if (HW_TS_Create(CFG_TIM_PROC_ID_ISR,
+                   &BleLinkLedTimerId,
+                   hw_ts_Repeated,
+                   BleLinkLed_Timeout) == hw_ts_Successful)
+  {
+    BleLinkLedTimerReady = 1U;
+  }
+  BleLinkLed_StartBlink();
   /* USER CODE END APP_BLE_Init_4 */
 
   /**
@@ -446,7 +464,7 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
                     p_disconnection_complete_event->Reason);
 
         /* USER CODE BEGIN EVT_DISCONN_COMPLETE_2 */
-
+        BleLinkLed_StartBlink();
         /* USER CODE END EVT_DISCONN_COMPLETE_2 */
       }
 
@@ -531,7 +549,15 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
           HandleNotification.ConnectionHandle = BleApplicationContext.BleApplicationContext_legacy.connectionHandle;
           Custom_APP_Notification(&HandleNotification);
           /* USER CODE BEGIN HCI_EVT_LE_CONN_COMPLETE */
-          UTIL_SEQ_SetTask(1 << CFG_TASK_LINK_CONFIG_ID, CFG_SCH_PRIO_0);
+          if (p_connection_complete_event->Status == BLE_STATUS_SUCCESS)
+          {
+            BleLinkLed_SetConnected();
+            UTIL_SEQ_SetTask(1 << CFG_TASK_LINK_CONFIG_ID, CFG_SCH_PRIO_0);
+          }
+          else
+          {
+            BleLinkLed_StartBlink();
+          }
           /* USER CODE END HCI_EVT_LE_CONN_COMPLETE */
           break; /* HCI_LE_CONNECTION_COMPLETE_SUBEVT_CODE */
         }
@@ -738,6 +764,13 @@ static void Ble_Hci_Gap_Gatt_Init(void)
    * Write the BD Address
    */
   p_bd_addr = BleGetBdAddress();
+  SensorNodeId = (uint16_t)p_bd_addr[0] | ((uint16_t)p_bd_addr[1] << 8);
+  if ((SensorNodeId == 0x0000U) || (SensorNodeId == 0xFFFFU))
+  {
+    SensorNodeId ^= 0x5A5AU;
+  }
+  a_AdvData[4] = (uint8_t)SensorNodeId;
+  a_AdvData[5] = (uint8_t)(SensorNodeId >> 8);
   ret = aci_hal_write_config_data(CONFIG_DATA_PUBADDR_OFFSET, CONFIG_DATA_PUBADDR_LEN, (uint8_t*) p_bd_addr);
   if (ret != BLE_STATUS_SUCCESS)
   {
@@ -1055,6 +1088,11 @@ const uint8_t* BleGetBdAddress(void)
   return p_bd_addr;
 }
 
+uint16_t APP_BLE_GetNodeId(void)
+{
+  return SensorNodeId;
+}
+
 /* USER CODE BEGIN FD_LOCAL_FUNCTION */
 
 /* USER CODE END FD_LOCAL_FUNCTION */
@@ -1269,6 +1307,53 @@ void SVCCTL_ResumeUserEventFlow(void)
 }
 
 /* USER CODE BEGIN FD_WRAP_FUNCTIONS */
+static void BleLinkLed_StartBlink(void)
+{
+  BleLinkLedBlinkEnabled = 1U;
+  BSP_LED_Off(LED_GREEN);
+
+  if (BleLinkLedTimerReady != 0U)
+  {
+    HW_TS_Stop(BleLinkLedTimerId);
+    HW_TS_Start(BleLinkLedTimerId, BleLinkLed_MsToTicks(BLE_LINK_LED_BLINK_MS));
+  }
+  else
+  {
+    /* A timer allocation failure is visible as a steady-off link LED. */
+    APP_DBG_MSG("BLE link LED timer allocation failed\n\r");
+  }
+}
+
+static void BleLinkLed_SetConnected(void)
+{
+  BleLinkLedBlinkEnabled = 0U;
+  if (BleLinkLedTimerReady != 0U)
+  {
+    HW_TS_Stop(BleLinkLedTimerId);
+  }
+  BSP_LED_On(LED_GREEN);
+}
+
+static void BleLinkLed_Timeout(void)
+{
+  if (BleLinkLedBlinkEnabled != 0U)
+  {
+    BSP_LED_Toggle(LED_GREEN);
+  }
+  else
+  {
+    BSP_LED_On(LED_GREEN);
+  }
+}
+
+static uint32_t BleLinkLed_MsToTicks(uint32_t timeout_ms)
+{
+  uint32_t timeout_ticks = ((timeout_ms * 1000U) + CFG_TS_TICK_VAL - 1U) /
+                           CFG_TS_TICK_VAL;
+
+  return (timeout_ticks == 0U) ? 1U : timeout_ticks;
+}
+
 static void LinkConfiguration(void)
 {
   tBleStatus status;
@@ -1280,14 +1365,11 @@ static void LinkConfiguration(void)
     APP_DBG_MSG("set data length command error \n");
   }
 
-  APP_DBG_MSG("change ATT MTU size \n");
-  status = aci_gatt_exchange_config(BleApplicationContext.BleApplicationContext_legacy.connectionHandle);
-  if (status != BLE_STATUS_SUCCESS)
-  {
-     APP_DBG_MSG("change MTU cmd failure: 0x%x\n", status);
-  }
-  UTIL_SEQ_WaitEvt(1 << CFG_IDLEEVT_GATT_PROC_COMPLETE);
-  APP_DBG_MSG("DTC_PROC_MTU_UPDATE complete event received \n");
+  /*
+   * The multi-link relay is the GATT client and owns ATT MTU negotiation for
+   * each connection.  Do not start a competing procedure from the peripheral,
+   * and never wait for a completion event when command start may have failed.
+   */
   return;
 }
 /* USER CODE END FD_WRAP_FUNCTIONS */

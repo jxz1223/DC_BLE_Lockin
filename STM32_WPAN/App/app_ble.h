@@ -74,6 +74,7 @@ APP_BLE_ConnStatus_t APP_BLE_Get_Server_Connection_Status(void);
 void APP_BLE_Key_Button1_Action(void);
 void APP_BLE_Key_Button2_Action(void);
 void APP_BLE_Key_Button3_Action(void);
+uint16_t APP_BLE_GetNodeId(void);
 /* USER CODE END EF */
 
 #ifdef __cplusplus

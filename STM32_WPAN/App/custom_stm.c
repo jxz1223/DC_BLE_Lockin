@@ -353,7 +353,7 @@ void SVCCTL_InitCustomSvc(void)
                           SizeTx_Char,
                           CHAR_PROP_NOTIFY,
                           ATTR_PERMISSION_NONE,
-                          GATT_DONT_NOTIFY_EVENTS,
+                          GATT_NOTIFY_NOTIFICATION_COMPLETION,
                           0x10,
                           CHAR_VALUE_LEN_VARIABLE,
                           &(CustomContext.CustomTx_CharHdle));

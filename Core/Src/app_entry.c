@@ -543,7 +543,9 @@ static void Led_Init( void )
   BSP_LED_Init(LED_GREEN);
   BSP_LED_Init(LED_RED);
 
-  BSP_LED_On(LED_GREEN);
+  BSP_LED_Off(LED_BLUE);
+  BSP_LED_Off(LED_GREEN);
+  BSP_LED_Off(LED_RED);
 #endif
 
   return;

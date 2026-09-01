@@ -26,6 +26,8 @@
 #include "custom_app.h"
 #include "custom_stm.h"
 #include "stm32_seq.h"
+#include "app_ble.h"
+#include "multi_node_protocol.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -87,33 +89,36 @@ typedef struct
 #define TOGGLE_OFF                      0
 #define SENSOR_LEGACY_STREAM_ENABLED    0U
 
-#define SENSOR_PROTOCOL_MAGIC_0         0xA5U
-#define SENSOR_PROTOCOL_MAGIC_1         0x5AU
-#define SENSOR_PROTOCOL_VERSION         0x01U
-#define SENSOR_PROTOCOL_HEADER_LEN      8U
-#define SENSOR_PROTOCOL_MAX_PAYLOAD     234U
-#define SENSOR_PROTOCOL_MAX_FRAME       246U
+#define SENSOR_PROTOCOL_MAGIC_0         MULTI_PROTOCOL_MAGIC_0
+#define SENSOR_PROTOCOL_MAGIC_1         MULTI_PROTOCOL_MAGIC_1
+#define SENSOR_PROTOCOL_VERSION         MULTI_PROTOCOL_VERSION
+#define SENSOR_PROTOCOL_HEADER_LEN      MULTI_PROTOCOL_HEADER_LEN
+#define SENSOR_PROTOCOL_MAX_PAYLOAD     MULTI_PROTOCOL_MAX_PAYLOAD
+#define SENSOR_PROTOCOL_MAX_FRAME       MULTI_PROTOCOL_MAX_FRAME
 
-#define SENSOR_CMD_SCAN_START           0x10U
-#define SENSOR_CMD_SET_DAC              0x11U
-#define SENSOR_CMD_ABORT                0x12U
+#define SENSOR_CMD_SCAN_START           MULTI_CMD_SCAN_START
+#define SENSOR_CMD_SET_DAC              MULTI_CMD_SET_DAC
+#define SENSOR_CMD_ABORT                MULTI_CMD_ABORT
+#define SENSOR_CMD_STREAM_GRANT         MULTI_CMD_STREAM_GRANT
+#define SENSOR_CMD_FRAME_ACK            MULTI_CMD_FRAME_ACK
 
-#define SENSOR_EVT_ACK                  0x80U
-#define SENSOR_EVT_NACK                 0x81U
-#define SENSOR_EVT_SCAN_BEGIN           0x90U
-#define SENSOR_EVT_SCAN_POINTS          0x91U
-#define SENSOR_EVT_SCAN_END             0x92U
-#define SENSOR_EVT_SENSOR_READINGS      0x93U
-#define SENSOR_EVT_BLE_RAW              0xA0U
+#define SENSOR_EVT_ACK                  MULTI_EVT_ACK
+#define SENSOR_EVT_NACK                 MULTI_EVT_NACK
+#define SENSOR_EVT_SCAN_BEGIN           MULTI_EVT_SCAN_BEGIN
+#define SENSOR_EVT_SCAN_POINTS          MULTI_EVT_SCAN_POINTS
+#define SENSOR_EVT_SCAN_END             MULTI_EVT_SCAN_END
+#define SENSOR_EVT_SENSOR_READINGS      MULTI_EVT_SENSOR_READINGS
+#define SENSOR_EVT_BLE_RAW              MULTI_EVT_BLE_RAW
 
-#define SENSOR_STATUS_OK                0x00U
-#define SENSOR_STATUS_CRC_ERROR         0x01U
-#define SENSOR_STATUS_BAD_VERSION       0x02U
-#define SENSOR_STATUS_BAD_LENGTH        0x03U
-#define SENSOR_STATUS_UNKNOWN_TYPE      0x04U
-#define SENSOR_STATUS_BUSY              0x06U
+#define SENSOR_STATUS_OK                MULTI_STATUS_OK
+#define SENSOR_STATUS_CRC_ERROR         MULTI_STATUS_CRC_ERROR
+#define SENSOR_STATUS_BAD_VERSION       MULTI_STATUS_BAD_VERSION
+#define SENSOR_STATUS_BAD_LENGTH        MULTI_STATUS_BAD_LENGTH
+#define SENSOR_STATUS_UNKNOWN_TYPE      MULTI_STATUS_UNKNOWN_TYPE
+#define SENSOR_STATUS_BUSY              MULTI_STATUS_BUSY
+#define SENSOR_STATUS_QUEUE_FULL        MULTI_STATUS_QUEUE_FULL
 
-#define SENSOR_SET_FLAG_SAVE_DAC        0x01U
+#define SENSOR_SET_FLAG_SAVE_DAC        MULTI_SET_DAC_FLAG_SAVE
 #define SENSOR_SCAN_POINTS_PER_FRAME    10U
 #define SENSOR_SCAN_DEFAULT_SETTLE_MS   20U
 #define SENSOR_SCAN_MAX_SETTLE_MS       80U
@@ -121,6 +126,10 @@ typedef struct
 #define SENSOR_LOCKIN_WAIT_TIMEOUT_MS   40U
 #define SENSOR_READING_ITEMS_PER_FRAME  1U
 #define SENSOR_READING_ITEM_SIZE        8U
+#define SENSOR_TX_QUEUE_DEPTH           8U
+#define SENSOR_TX_ACK_TIMEOUT_MS        180U
+#define SENSOR_TX_MAX_RETRIES           3U
+#define SENSOR_STREAM_CREDIT_LIMIT      8U
 
 #define SENSOR_DAC_STORE_MAGIC          0xDAC05A5AU
 #define SENSOR_APP_FLASH_SIZE           (512U * 1024U)
@@ -158,7 +167,6 @@ __IO   uint8_t ubDmaTransferStatus = 2; /* Variable set into DMA interruption ca
 uint16_t kk;
 uint16_t Att_Mtu_Exchanged;
 __IO uint8_t buffer1 = 0;
-uint8_t jj=0;
 uint8_t jk=0;
 uint8_t jjk=0;
 #define LOCKIN_REF_TABLE_SIZE                 8
@@ -169,10 +177,34 @@ static const int16_t LockinCosQ15[LOCKIN_REF_TABLE_SIZE] = {32767, 23170, 0, -23
 uint32_t lockin_sample_index = 0;
 __IO uint16_t lockin_rms_value = 0;
 static Sensor_ScanContext_t SensorScan;
+typedef struct
+{
+  uint8_t Length;
+  uint8_t Type;
+  uint8_t Reliable;
+  uint8_t Sent;
+  uint8_t Retries;
+  uint16_t ScanId;
+  uint16_t Seq;
+  uint32_t LastSendTick;
+  uint8_t Data[SENSOR_PROTOCOL_MAX_FRAME];
+} Sensor_TxSlot_t;
+
 static uint16_t SensorCurrentDac = 0U;
 static uint8_t SensorNotifyReady = 0U;
-static uint8_t SensorTxFrame[SENSOR_PROTOCOL_MAX_FRAME];
+static Sensor_TxSlot_t SensorTxQueue[SENSOR_TX_QUEUE_DEPTH];
+static uint8_t SensorTxHead;
+static uint8_t SensorTxTail;
+static uint8_t SensorTxCount;
+static uint8_t SensorStreamCredits;
+static uint16_t SensorTransportSeq = 1U;
 static uint16_t SensorReadingSeq = 0U;
+static uint8_t SensorLastCommandValid;
+static uint8_t SensorLastCommandType;
+static uint16_t SensorLastCommandScanId;
+static uint16_t SensorLastCommandSeq;
+static uint8_t SensorLastCommandStatus;
+static uint8_t SensorLastCommandWasAck;
 static __IO uint16_t SensorLatestAdcSample = 0U;
 static __IO uint32_t SensorLockinSeq = 0U;
 /* USER CODE END PV */
@@ -203,6 +235,19 @@ static void Sensor_SendDiag(const char *text);
 static void Sensor_SendAck(uint8_t type, uint16_t scan_id, uint16_t seq, uint8_t status);
 static void Sensor_SendNack(uint8_t type, uint16_t scan_id, uint16_t seq, uint8_t status);
 static tBleStatus Sensor_SendReadingFrame(void);
+static void Sensor_TxPump(void);
+static void Sensor_TxPop(void);
+static void Sensor_PrioritizeBusinessCommand(void);
+static void Sensor_TxReset(void);
+static void Sensor_HandleFrameAck(uint16_t scan_id, uint16_t seq,
+                                  const uint8_t *payload, uint8_t payload_len);
+static void Sensor_RecordCommandResult(uint8_t type, uint16_t scan_id,
+                                       uint16_t seq, uint8_t status,
+                                       uint8_t was_ack);
+static uint8_t Sensor_IsDuplicateCommand(uint8_t type, uint16_t scan_id,
+                                         uint16_t seq);
+static void Sensor_RefreshQueuedFrameCrc(Sensor_TxSlot_t *pSlot);
+static uint8_t Sensor_HasQueuedReading(void);
 static uint16_t Sensor_Crc16Ccitt(const uint8_t *data, uint16_t length);
 static uint16_t Sensor_ReadLe16(const uint8_t *payload);
 static void Sensor_WriteLe16(uint8_t *payload, uint16_t value);
@@ -212,6 +257,7 @@ static uint16_t Sensor_WaitNextLockinValue(uint32_t *pLastSeq);
 static void Sensor_DacApply(uint16_t dac_code);
 static uint16_t Sensor_DacLoadSaved(uint16_t fallback);
 static uint8_t Sensor_DacSave(uint16_t dac_code);
+static uint8_t Sensor_IsBusinessCommand(uint8_t type);
 /* USER CODE END PFP */
 
 /* Functions Definition ------------------------------------------------------*/
@@ -229,9 +275,8 @@ void Custom_STM_App_Notification(Custom_STM_App_Notification_evt_t *pNotificatio
     /* DT_SERVICE */
     case CUSTOM_STM_TX_CHAR_NOTIFY_ENABLED_EVT:
       /* USER CODE BEGIN CUSTOM_STM_TX_CHAR_NOTIFY_ENABLED_EVT */
-    	Custom_App_Context.Tx_char_Notification_Status = 1;
+      Custom_App_Context.Tx_char_Notification_Status = 1;
       SensorNotifyReady = 1U;
-      BSP_LED_On(LED_GREEN);
       Sensor_SendDiag("SENSOR_NOTIFY_ENABLED");
     	UTIL_SEQ_SetTask(1 << CFG_TASK_DATA_TRANSFER_UPDATE_ID, CFG_SCH_PRIO_0);
       /* USER CODE END CUSTOM_STM_TX_CHAR_NOTIFY_ENABLED_EVT */
@@ -239,9 +284,8 @@ void Custom_STM_App_Notification(Custom_STM_App_Notification_evt_t *pNotificatio
 
     case CUSTOM_STM_TX_CHAR_NOTIFY_DISABLED_EVT:
       /* USER CODE BEGIN CUSTOM_STM_TX_CHAR_NOTIFY_DISABLED_EVT */
-    	Custom_App_Context.Tx_char_Notification_Status = 0;
+      Custom_App_Context.Tx_char_Notification_Status = 0;
       SensorNotifyReady = 0U;
-      BSP_LED_Off(LED_GREEN);
       /* USER CODE END CUSTOM_STM_TX_CHAR_NOTIFY_DISABLED_EVT */
       break;
 
@@ -255,7 +299,12 @@ void Custom_STM_App_Notification(Custom_STM_App_Notification_evt_t *pNotificatio
 
     case CUSTOM_STM_NOTIFICATION_COMPLETE_EVT:
       /* USER CODE BEGIN CUSTOM_STM_NOTIFICATION_COMPLETE_EVT */
+      /* Queue ownership is based on API acceptance/application ACK, not this optional event. */
       UTIL_SEQ_SetTask(1 << CFG_TASK_DATA_TRANSFER_UPDATE_ID, CFG_SCH_PRIO_0);
+      if (SensorScan.Active != 0U)
+      {
+        UTIL_SEQ_SetTask(1U << CFG_TASK_DAC_SCAN_ID, CFG_SCH_PRIO_0);
+      }
       /* USER CODE END CUSTOM_STM_NOTIFICATION_COMPLETE_EVT */
       break;
 
@@ -284,6 +333,7 @@ void Custom_APP_Notification(Custom_App_ConnHandle_Not_evt_t *pNotification)
     /* USER CODE END P2PS_CUSTOM_Notification_Custom_Evt_Opcode */
     case CUSTOM_CONN_HANDLE_EVT :
       /* USER CODE BEGIN CUSTOM_CONN_HANDLE_EVT */
+      Connection_Handle = pNotification->ConnectionHandle;
       BSP_LED_On(LED_BLUE);
       BSP_LED_Off(LED_RED);
       /* USER CODE END CUSTOM_CONN_HANDLE_EVT */
@@ -293,8 +343,11 @@ void Custom_APP_Notification(Custom_App_ConnHandle_Not_evt_t *pNotification)
       /* USER CODE BEGIN CUSTOM_DISCON_HANDLE_EVT */
       SensorNotifyReady = 0U;
       Custom_App_Context.Tx_char_Notification_Status = 0U;
+      SensorStreamCredits = 0U;
+      SensorScan.Active = 0U;
+      Sensor_TxReset();
+      Connection_Handle = 0U;
       BSP_LED_Off(LED_BLUE);
-      BSP_LED_Off(LED_GREEN);
       BSP_LED_On(LED_RED);
       /* USER CODE END CUSTOM_DISCON_HANDLE_EVT */
       break;
@@ -326,6 +379,7 @@ void Custom_APP_Init(void)
 	UTIL_SEQ_RegTask(1U << CFG_TASK_DAC_SCAN_ID, UTIL_SEQ_RFU, Sensor_Scan_Task);
 	Custom_App_Context.Tx_char_Notification_Status = 0;
   SensorNotifyReady = 0U;
+  Sensor_TxReset();
   /* USER CODE END CUSTOM_APP_Init */
   return;
 }
@@ -360,7 +414,7 @@ __USED void Custom_Tx_char_Update_Char(void) /* Property Read */
   return;
 }
 
-void Custom_Tx_char_Send_Notification(void) /* Property Notification */
+__USED void Custom_Tx_char_Send_Notification(void) /* Property Notification */
 {
   uint8_t updateflag = 0;
 
@@ -576,50 +630,14 @@ void ADC_START(void)
 
 void SendData( void )
 {
-#if (SENSOR_LEGACY_STREAM_ENABLED != 0U)
-	tBleStatus status = BLE_STATUS_INVALID_PARAMS;
-  if (Custom_App_Context.Tx_char_Notification_Status == 1 )
-  {
-		if	(buffer1==1)
-		{
+  Sensor_TxPump();
 
-			kk=kk+1;
-			if (kk==20)
-			{
-				BSP_LED_On(LED_BLUE);
-
-			}
-			if (kk==40)
-			{
-				BSP_LED_Off(LED_BLUE);
-
-				kk=0;
-			}
-			status = Custom_STM_App_Update_Char(CUSTOM_STM_TX_CHAR, (uint8_t *)NotifyCharData);
-			//if (status != BLE_STATUS_SUCCESS)
-			//{
-				//BSP_LED_On(LED_RED);
-			//}
-			buffer1 = 0;
-			if (status == BLE_STATUS_INSUFFICIENT_RESOURCES)
-			{
-				Custom_App_Context.Tx_char_Notification_Status = 0;
-			}
-			else
-			{
-				UTIL_SEQ_SetTask(1 << CFG_TASK_DATA_TRANSFER_UPDATE_ID, CFG_SCH_PRIO_0);
-			}
-
-		}
-		else
-		{
-			UTIL_SEQ_SetTask(1 << CFG_TASK_DATA_TRANSFER_UPDATE_ID, CFG_SCH_PRIO_0);
-		}
-  }
-#endif
   if ((SensorNotifyReady != 0U) &&
       (Custom_App_Context.Tx_char_Notification_Status == 1U) &&
-      (buffer1 == 1U))
+      (buffer1 == 1U) &&
+      (SensorScan.Active == 0U) &&
+      (SensorStreamCredits > 0U) &&
+      (Sensor_HasQueuedReading() == 0U))
   {
     tBleStatus status;
 
@@ -638,10 +656,8 @@ void SendData( void )
     if (status == BLE_STATUS_SUCCESS)
     {
       buffer1 = 0U;
-    }
-    else if (status == BLE_STATUS_INSUFFICIENT_RESOURCES)
-    {
-      Custom_App_Context.Tx_char_Notification_Status = 0U;
+      SensorStreamCredits--;
+      Sensor_TxPump();
     }
   }
   return;
@@ -649,16 +665,6 @@ void SendData( void )
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
-	jj=jj+1;
-	if (jj>20)
-	{
-		BSP_LED_On(LED_GREEN);
-	}
-	if (jj>40)
-	{
-    BSP_LED_Off(LED_GREEN);
-    jj=0;
-	}
 	/*单定时器结束*/
 
   /* Computation of ADC conversions raw data to physical values               */
@@ -781,6 +787,7 @@ static uint64_t IntSqrt64(uint64_t value)
 static void Sensor_Command_Received(const uint8_t *pPayload, uint8_t length)
 {
   uint8_t status;
+  uint8_t business_command;
 
   if ((pPayload == 0) || (length == 0U))
   {
@@ -788,10 +795,38 @@ static void Sensor_Command_Received(const uint8_t *pPayload, uint8_t length)
     return;
   }
 
+  business_command = ((length > MULTI_FRAME_TYPE_OFFSET) &&
+                      (Sensor_IsBusinessCommand(pPayload[MULTI_FRAME_TYPE_OFFSET]) != 0U)) ? 1U : 0U;
+  if (business_command != 0U)
+  {
+    Sensor_PrioritizeBusinessCommand();
+  }
+
   status = Sensor_ParseFrame(pPayload, length);
   if (status != SENSOR_STATUS_OK)
   {
+    BSP_LED_On(LED_RED);
+    /* Protocol NACK must precede optional diagnostics in the BLE TX queue. */
     Sensor_SendNack(0U, 0U, 0U, status);
+    if ((business_command != 0U) && (status == SENSOR_STATUS_CRC_ERROR))
+    {
+      Sensor_SendDiag("SENSOR_PARSE_CRC_ERROR");
+    }
+    else if ((business_command != 0U) && (status == SENSOR_STATUS_BAD_VERSION))
+    {
+      Sensor_SendDiag("SENSOR_PARSE_VERSION_ERROR");
+    }
+    else if (business_command != 0U)
+    {
+      Sensor_SendDiag("SENSOR_PARSE_LENGTH_ERROR");
+    }
+  }
+  else if (business_command != 0U)
+  {
+    /* Sensor_HandleCommand has already queued the business ACK/NACK.  Keep
+     * trace text behind it so diagnostics can never cause a false timeout. */
+    Sensor_SendDiag("SENSOR_RX_COMMAND");
+    Sensor_SendDiag("SENSOR_FRAME_VALID");
   }
 }
 
@@ -799,6 +834,7 @@ static uint8_t Sensor_ParseFrame(const uint8_t *data, uint8_t length)
 {
   uint8_t type;
   uint8_t flags;
+  uint16_t node_id;
   uint16_t scan_id;
   uint16_t seq;
   uint8_t payload_len;
@@ -822,9 +858,16 @@ static uint8_t Sensor_ParseFrame(const uint8_t *data, uint8_t length)
 
   type = data[3];
   flags = data[4];
-  scan_id = Sensor_ReadLe16(&data[5]);
-  seq = Sensor_ReadLe16(&data[7]);
-  payload_len = data[9];
+  node_id = Sensor_ReadLe16(&data[MULTI_FRAME_NODE_ID_OFFSET]);
+  scan_id = Sensor_ReadLe16(&data[MULTI_FRAME_SCAN_ID_OFFSET]);
+  seq = Sensor_ReadLe16(&data[MULTI_FRAME_SEQ_OFFSET]);
+  payload_len = data[MULTI_FRAME_PAYLOAD_LEN_OFFSET];
+
+  if ((node_id != APP_BLE_GetNodeId()) &&
+      (node_id != MULTI_PROTOCOL_NODE_BROADCAST))
+  {
+    return SENSOR_STATUS_BAD_LENGTH;
+  }
 
   if ((payload_len > SENSOR_PROTOCOL_MAX_PAYLOAD) ||
       (length != (uint8_t)(2U + SENSOR_PROTOCOL_HEADER_LEN + payload_len + 2U)))
@@ -832,19 +875,37 @@ static uint8_t Sensor_ParseFrame(const uint8_t *data, uint8_t length)
     return SENSOR_STATUS_BAD_LENGTH;
   }
 
-  received_crc = Sensor_ReadLe16(&data[10U + payload_len]);
-  calc_crc = Sensor_Crc16Ccitt(&data[2], (uint16_t)(SENSOR_PROTOCOL_HEADER_LEN + payload_len));
+  received_crc = Sensor_ReadLe16(&data[MULTI_FRAME_PAYLOAD_OFFSET + payload_len]);
+  calc_crc = Sensor_Crc16Ccitt(&data[MULTI_FRAME_VERSION_OFFSET],
+                               (uint16_t)(SENSOR_PROTOCOL_HEADER_LEN + payload_len));
   if (received_crc != calc_crc)
   {
     return SENSOR_STATUS_CRC_ERROR;
   }
 
-  return Sensor_HandleCommand(type, flags, scan_id, seq, &data[10], payload_len);
+  return Sensor_HandleCommand(type, flags, scan_id, seq,
+                              &data[MULTI_FRAME_PAYLOAD_OFFSET], payload_len);
 }
 
 static uint8_t Sensor_HandleCommand(uint8_t type, uint8_t flags, uint16_t scan_id, uint16_t seq, const uint8_t *payload, uint8_t payload_len)
 {
   uint16_t dac_code;
+
+  if (((type == SENSOR_CMD_SCAN_START) ||
+       (type == SENSOR_CMD_SET_DAC) ||
+       (type == SENSOR_CMD_ABORT)) &&
+      (Sensor_IsDuplicateCommand(type, scan_id, seq) != 0U))
+  {
+    if (SensorLastCommandWasAck != 0U)
+    {
+      Sensor_SendAck(type, scan_id, seq, SensorLastCommandStatus);
+    }
+    else
+    {
+      Sensor_SendNack(type, scan_id, seq, SensorLastCommandStatus);
+    }
+    return SENSOR_STATUS_OK;
+  }
 
   switch (type)
   {
@@ -900,10 +961,11 @@ static uint8_t Sensor_HandleCommand(uint8_t type, uint8_t flags, uint16_t scan_i
       SensorScan.NextPoint = 0U;
       SensorScan.CompletedPoints = 0U;
       SensorScan.PreScanDac = SensorCurrentDac;
+      SensorStreamCredits = 0U;
 
       Sensor_SendAck(type, scan_id, seq, SENSOR_STATUS_OK);
       BSP_LED_On(LED_BLUE);
-      Sensor_SendDiag("SENSOR_SCAN_START");
+      Sensor_SendDiag("SENSOR_SCAN_ACCEPTED");
       UTIL_SEQ_SetTask(1U << CFG_TASK_DAC_SCAN_ID, CFG_SCH_PRIO_0);
       return SENSOR_STATUS_OK;
 
@@ -914,11 +976,16 @@ static uint8_t Sensor_HandleCommand(uint8_t type, uint8_t flags, uint16_t scan_i
         Sensor_SendNack(type, scan_id, seq, SENSOR_STATUS_BAD_LENGTH);
         return SENSOR_STATUS_OK;
       }
+      if (SensorScan.Active != 0U)
+      {
+        Sensor_SendNack(type, scan_id, seq, SENSOR_STATUS_BUSY);
+        return SENSOR_STATUS_OK;
+      }
 
       dac_code = Sensor_ReadLe16(&payload[0]);
       Sensor_DacApply(dac_code);
-      (void)flags;
-      if (Sensor_DacSave(dac_code) == 0U)
+      if (((flags & SENSOR_SET_FLAG_SAVE_DAC) != 0U) &&
+          (Sensor_DacSave(dac_code) == 0U))
       {
         BSP_LED_On(LED_RED);
         Sensor_SendNack(type, scan_id, seq, SENSOR_STATUS_BUSY);
@@ -926,7 +993,6 @@ static uint8_t Sensor_HandleCommand(uint8_t type, uint8_t flags, uint16_t scan_i
       }
       else
       {
-        BSP_LED_Toggle(LED_GREEN);
         Sensor_SendAck(type, scan_id, seq, SENSOR_STATUS_OK);
         Sensor_SendDiag("SENSOR_SET_DAC_OK");
       }
@@ -938,6 +1004,23 @@ static uint8_t Sensor_HandleCommand(uint8_t type, uint8_t flags, uint16_t scan_i
       Sensor_SendAck(type, scan_id, seq, SENSOR_STATUS_OK);
       Sensor_SendDiag("SENSOR_ABORT");
       UTIL_SEQ_SetTask(1U << CFG_TASK_DAC_SCAN_ID, CFG_SCH_PRIO_0);
+      return SENSOR_STATUS_OK;
+
+    case SENSOR_CMD_STREAM_GRANT:
+      if (payload_len < 1U)
+      {
+        return SENSOR_STATUS_BAD_LENGTH;
+      }
+      if (SensorScan.Active == 0U)
+      {
+        SensorStreamCredits = (payload[0] > SENSOR_STREAM_CREDIT_LIMIT) ?
+                              SENSOR_STREAM_CREDIT_LIMIT : payload[0];
+        UTIL_SEQ_SetTask(1U << CFG_TASK_DATA_TRANSFER_UPDATE_ID, CFG_SCH_PRIO_0);
+      }
+      return SENSOR_STATUS_OK;
+
+    case SENSOR_CMD_FRAME_ACK:
+      Sensor_HandleFrameAck(scan_id, seq, payload, payload_len);
       return SENSOR_STATUS_OK;
 
     default:
@@ -979,12 +1062,16 @@ static void Sensor_Scan_Task(void)
     begin_payload[8] = SensorScan.AvgBlocks;
     Sensor_WriteLe16(&begin_payload[9], SensorScan.PreScanDac);
 
-    if (Sensor_SendFrame(SENSOR_EVT_SCAN_BEGIN, 0U, SensorScan.ScanId, SensorScan.Seq, begin_payload, sizeof(begin_payload)) == BLE_STATUS_SUCCESS)
+    if (Sensor_SendFrame(SENSOR_EVT_SCAN_BEGIN,
+                         MULTI_PROTOCOL_FLAG_ACK_REQUIRED,
+                         SensorScan.ScanId,
+                         SensorTransportSeq++,
+                         begin_payload, sizeof(begin_payload)) == BLE_STATUS_SUCCESS)
     {
       SensorScan.BeginSent = 1U;
-      Sensor_SendDiag("SENSOR_SCAN_BEGIN_SENT");
+      Sensor_SendDiag("SENSOR_SCAN_EXECUTING");
+      UTIL_SEQ_SetTask(1U << CFG_TASK_DAC_SCAN_ID, CFG_SCH_PRIO_0);
     }
-    UTIL_SEQ_SetTask(1U << CFG_TASK_DAC_SCAN_ID, CFG_SCH_PRIO_0);
     return;
   }
 
@@ -992,15 +1079,21 @@ static void Sensor_Scan_Task(void)
   {
     uint8_t end_payload[5];
     Sensor_DacApply(SensorScan.PreScanDac);
-    SensorScan.Active = 0U;
-    SensorScan.AbortRequested = 0U;
     end_payload[0] = 1U;
     Sensor_WriteLe16(&end_payload[1], SensorScan.CompletedPoints);
     Sensor_WriteLe16(&end_payload[3], SensorCurrentDac);
-    (void)Sensor_SendFrame(SENSOR_EVT_SCAN_END, 0U, SensorScan.ScanId, SensorScan.Seq, end_payload, sizeof(end_payload));
-    BSP_LED_Off(LED_BLUE);
-    BSP_LED_Toggle(LED_RED);
-    Sensor_SendDiag("SENSOR_SCAN_ABORTED");
+    if (Sensor_SendFrame(SENSOR_EVT_SCAN_END,
+                         MULTI_PROTOCOL_FLAG_ACK_REQUIRED,
+                         SensorScan.ScanId,
+                         SensorTransportSeq++,
+                         end_payload, sizeof(end_payload)) == BLE_STATUS_SUCCESS)
+    {
+      SensorScan.Active = 0U;
+      SensorScan.AbortRequested = 0U;
+      Sensor_SendDiag("SENSOR_SCAN_ABORTED");
+      BSP_LED_Off(LED_BLUE);
+      BSP_LED_Toggle(LED_RED);
+    }
     return;
   }
 
@@ -1008,14 +1101,24 @@ static void Sensor_Scan_Task(void)
   {
     uint8_t end_payload[5];
     Sensor_DacApply(SensorScan.PreScanDac);
-    SensorScan.Active = 0U;
     end_payload[0] = 0U;
     Sensor_WriteLe16(&end_payload[1], SensorScan.CompletedPoints);
     Sensor_WriteLe16(&end_payload[3], SensorCurrentDac);
-    (void)Sensor_SendFrame(SENSOR_EVT_SCAN_END, 0U, SensorScan.ScanId, SensorScan.Seq, end_payload, sizeof(end_payload));
-    BSP_LED_Off(LED_BLUE);
-    BSP_LED_Toggle(LED_GREEN);
-    Sensor_SendDiag("SENSOR_SCAN_DONE");
+    if (Sensor_SendFrame(SENSOR_EVT_SCAN_END,
+                         MULTI_PROTOCOL_FLAG_ACK_REQUIRED,
+                         SensorScan.ScanId,
+                         SensorTransportSeq++,
+                         end_payload, sizeof(end_payload)) == BLE_STATUS_SUCCESS)
+    {
+      SensorScan.Active = 0U;
+      Sensor_SendDiag("SENSOR_SCAN_COMPLETE");
+      BSP_LED_Off(LED_BLUE);
+    }
+    return;
+  }
+
+  if (SensorTxCount >= (SENSOR_TX_QUEUE_DEPTH - 1U))
+  {
     return;
   }
 
@@ -1040,52 +1143,226 @@ static void Sensor_Scan_Task(void)
 
   payload[0] = count;
   if (Sensor_SendFrame(SENSOR_EVT_SCAN_POINTS,
-                       0U,
+                       MULTI_PROTOCOL_FLAG_ACK_REQUIRED,
                        SensorScan.ScanId,
-                       SensorScan.Seq,
+                       SensorTransportSeq++,
                        payload,
                        (uint8_t)(1U + count * 5U)) == BLE_STATUS_INSUFFICIENT_RESOURCES)
   {
     SensorScan.NextPoint = (uint16_t)(SensorScan.NextPoint - count);
     SensorScan.CompletedPoints = (uint16_t)(SensorScan.CompletedPoints - count);
   }
-
-  UTIL_SEQ_SetTask(1U << CFG_TASK_DAC_SCAN_ID, CFG_SCH_PRIO_0);
+  else if (SensorTxCount < (SENSOR_TX_QUEUE_DEPTH - 1U))
+  {
+    UTIL_SEQ_SetTask(1U << CFG_TASK_DAC_SCAN_ID, CFG_SCH_PRIO_0);
+  }
 }
 
 static tBleStatus Sensor_SendFrame(uint8_t type, uint8_t flags, uint16_t scan_id, uint16_t seq, const uint8_t *payload, uint8_t payload_len)
 {
   uint16_t crc;
   uint16_t index = 0U;
+  Sensor_TxSlot_t *pSlot;
 
   if ((payload_len > SENSOR_PROTOCOL_MAX_PAYLOAD) ||
       ((payload_len > 0U) && (payload == 0)))
   {
     return BLE_STATUS_INVALID_PARAMS;
   }
+  if (SensorTxCount >= SENSOR_TX_QUEUE_DEPTH)
+  {
+    return BLE_STATUS_INSUFFICIENT_RESOURCES;
+  }
 
-  SensorTxFrame[index++] = SENSOR_PROTOCOL_MAGIC_0;
-  SensorTxFrame[index++] = SENSOR_PROTOCOL_MAGIC_1;
-  SensorTxFrame[index++] = SENSOR_PROTOCOL_VERSION;
-  SensorTxFrame[index++] = type;
-  SensorTxFrame[index++] = flags;
-  Sensor_WriteLe16(&SensorTxFrame[index], scan_id);
+  pSlot = &SensorTxQueue[SensorTxTail];
+  memset(pSlot, 0, sizeof(*pSlot));
+  pSlot->Data[index++] = SENSOR_PROTOCOL_MAGIC_0;
+  pSlot->Data[index++] = SENSOR_PROTOCOL_MAGIC_1;
+  pSlot->Data[index++] = SENSOR_PROTOCOL_VERSION;
+  pSlot->Data[index++] = type;
+  pSlot->Data[index++] = flags;
+  Sensor_WriteLe16(&pSlot->Data[index], APP_BLE_GetNodeId());
   index = (uint16_t)(index + 2U);
-  Sensor_WriteLe16(&SensorTxFrame[index], seq);
+  Sensor_WriteLe16(&pSlot->Data[index], scan_id);
   index = (uint16_t)(index + 2U);
-  SensorTxFrame[index++] = payload_len;
+  Sensor_WriteLe16(&pSlot->Data[index], seq);
+  index = (uint16_t)(index + 2U);
+  pSlot->Data[index++] = payload_len;
 
   if (payload_len > 0U)
   {
-    memcpy(&SensorTxFrame[index], payload, payload_len);
+    memcpy(&pSlot->Data[index], payload, payload_len);
     index = (uint16_t)(index + payload_len);
   }
 
-  crc = Sensor_Crc16Ccitt(&SensorTxFrame[2], (uint16_t)(SENSOR_PROTOCOL_HEADER_LEN + payload_len));
-  Sensor_WriteLe16(&SensorTxFrame[index], crc);
+  crc = Sensor_Crc16Ccitt(&pSlot->Data[MULTI_FRAME_VERSION_OFFSET],
+                          (uint16_t)(SENSOR_PROTOCOL_HEADER_LEN + payload_len));
+  Sensor_WriteLe16(&pSlot->Data[index], crc);
   index = (uint16_t)(index + 2U);
 
-  return Custom_STM_App_Update_Char_Variable_Length(CUSTOM_STM_TX_CHAR, SensorTxFrame, (uint8_t)index);
+  pSlot->Length = (uint8_t)index;
+  pSlot->Type = type;
+  pSlot->Reliable = ((flags & MULTI_PROTOCOL_FLAG_ACK_REQUIRED) != 0U) ? 1U : 0U;
+  pSlot->ScanId = scan_id;
+  pSlot->Seq = seq;
+  SensorTxTail = (uint8_t)((SensorTxTail + 1U) % SENSOR_TX_QUEUE_DEPTH);
+  SensorTxCount++;
+  UTIL_SEQ_SetTask(1U << CFG_TASK_DATA_TRANSFER_UPDATE_ID, CFG_SCH_PRIO_0);
+  return BLE_STATUS_SUCCESS;
+}
+
+static void Sensor_TxPump(void)
+{
+  Sensor_TxSlot_t *pSlot;
+
+  if ((SensorNotifyReady == 0U) ||
+      (Custom_App_Context.Tx_char_Notification_Status == 0U) ||
+      (SensorTxCount == 0U))
+  {
+    return;
+  }
+
+  pSlot = &SensorTxQueue[SensorTxHead];
+  if ((pSlot->Reliable != 0U) && (pSlot->Sent != 0U) &&
+      ((HAL_GetTick() - pSlot->LastSendTick) >= SENSOR_TX_ACK_TIMEOUT_MS))
+  {
+    if (pSlot->Retries >= SENSOR_TX_MAX_RETRIES)
+    {
+      if ((pSlot->Type == SENSOR_EVT_SCAN_BEGIN) ||
+          (pSlot->Type == SENSOR_EVT_SCAN_POINTS) ||
+          (pSlot->Type == SENSOR_EVT_SCAN_END))
+      {
+        SensorScan.Active = 0U;
+        BSP_LED_On(LED_RED);
+      }
+      Sensor_TxPop();
+      if (SensorTxCount == 0U)
+      {
+        return;
+      }
+      pSlot = &SensorTxQueue[SensorTxHead];
+    }
+    else
+    {
+      pSlot->Retries++;
+      pSlot->Sent = 0U;
+      pSlot->Data[MULTI_FRAME_FLAGS_OFFSET] |=
+        MULTI_PROTOCOL_FLAG_RETRANSMISSION;
+      Sensor_RefreshQueuedFrameCrc(pSlot);
+    }
+  }
+
+  if (pSlot->Sent == 0U)
+  {
+    tBleStatus status = Custom_STM_App_Update_Char_Variable_Length(
+      CUSTOM_STM_TX_CHAR, pSlot->Data, pSlot->Length);
+    if (status == BLE_STATUS_SUCCESS)
+    {
+      pSlot->LastSendTick = HAL_GetTick();
+      if (pSlot->Reliable != 0U)
+      {
+        pSlot->Sent = 1U;
+      }
+      else
+      {
+        Sensor_TxPop();
+        UTIL_SEQ_SetTask(1U << CFG_TASK_DATA_TRANSFER_UPDATE_ID, CFG_SCH_PRIO_0);
+        if (SensorScan.Active != 0U)
+        {
+          UTIL_SEQ_SetTask(1U << CFG_TASK_DAC_SCAN_ID, CFG_SCH_PRIO_0);
+        }
+      }
+    }
+  }
+}
+
+static void Sensor_TxPop(void)
+{
+  if (SensorTxCount == 0U)
+  {
+    return;
+  }
+  memset(&SensorTxQueue[SensorTxHead], 0, sizeof(SensorTxQueue[SensorTxHead]));
+  SensorTxHead = (uint8_t)((SensorTxHead + 1U) % SENSOR_TX_QUEUE_DEPTH);
+  SensorTxCount--;
+}
+
+static void Sensor_PrioritizeBusinessCommand(void)
+{
+  /* A telemetry frame may already be waiting for its application ACK when a
+   * PC command arrives.  Drop only stale leading telemetry/diagnostics so the
+   * command ACK cannot sit behind several seconds of unrelated traffic. */
+  SensorStreamCredits = 0U;
+  while (SensorTxCount > 0U)
+  {
+    uint8_t type = SensorTxQueue[SensorTxHead].Type;
+    if ((type != SENSOR_EVT_SENSOR_READINGS) &&
+        (type != SENSOR_EVT_BLE_RAW))
+    {
+      break;
+    }
+    Sensor_TxPop();
+  }
+}
+
+static void Sensor_TxReset(void)
+{
+  memset(SensorTxQueue, 0, sizeof(SensorTxQueue));
+  SensorTxHead = 0U;
+  SensorTxTail = 0U;
+  SensorTxCount = 0U;
+  SensorStreamCredits = 0U;
+  SensorLastCommandValid = 0U;
+}
+
+static void Sensor_HandleFrameAck(uint16_t scan_id, uint16_t seq,
+                                  const uint8_t *payload, uint8_t payload_len)
+{
+  Sensor_TxSlot_t *pSlot;
+
+  if ((payload_len < 1U) || (SensorTxCount == 0U))
+  {
+    return;
+  }
+  pSlot = &SensorTxQueue[SensorTxHead];
+  if ((pSlot->Reliable != 0U) && (pSlot->Type == payload[0]) &&
+      (pSlot->ScanId == scan_id) && (pSlot->Seq == seq))
+  {
+    if (pSlot->Type == SENSOR_EVT_SENSOR_READINGS)
+    {
+      SensorStreamCredits = 0U;
+    }
+    Sensor_TxPop();
+    UTIL_SEQ_SetTask(1U << CFG_TASK_DATA_TRANSFER_UPDATE_ID, CFG_SCH_PRIO_0);
+    if (SensorScan.Active != 0U)
+    {
+      UTIL_SEQ_SetTask(1U << CFG_TASK_DAC_SCAN_ID, CFG_SCH_PRIO_0);
+    }
+  }
+}
+
+static void Sensor_RefreshQueuedFrameCrc(Sensor_TxSlot_t *pSlot)
+{
+  uint8_t payload_len = pSlot->Data[MULTI_FRAME_PAYLOAD_LEN_OFFSET];
+  uint16_t crc = Sensor_Crc16Ccitt(
+    &pSlot->Data[MULTI_FRAME_VERSION_OFFSET],
+    (uint16_t)(SENSOR_PROTOCOL_HEADER_LEN + payload_len));
+  Sensor_WriteLe16(&pSlot->Data[MULTI_FRAME_PAYLOAD_OFFSET + payload_len], crc);
+}
+
+static uint8_t Sensor_HasQueuedReading(void)
+{
+  uint8_t count;
+  uint8_t index = SensorTxHead;
+  for (count = 0U; count < SensorTxCount; count++)
+  {
+    if (SensorTxQueue[index].Type == SENSOR_EVT_SENSOR_READINGS)
+    {
+      return 1U;
+    }
+    index = (uint8_t)((index + 1U) % SENSOR_TX_QUEUE_DEPTH);
+  }
+  return 0U;
 }
 
 static void Sensor_SendDiag(const char *text)
@@ -1107,7 +1384,7 @@ static void Sensor_SendDiag(const char *text)
   (void)Sensor_SendFrame(SENSOR_EVT_BLE_RAW,
                          0U,
                          0U,
-                         0U,
+                         SensorTransportSeq++,
                          (const uint8_t *)text,
                          (uint8_t)length);
 }
@@ -1115,6 +1392,7 @@ static void Sensor_SendDiag(const char *text)
 static void Sensor_SendAck(uint8_t type, uint16_t scan_id, uint16_t seq, uint8_t status)
 {
   uint8_t payload[2];
+  Sensor_RecordCommandResult(type, scan_id, seq, status, 1U);
   payload[0] = type;
   payload[1] = status;
   (void)Sensor_SendFrame(SENSOR_EVT_ACK, 0U, scan_id, seq, payload, sizeof(payload));
@@ -1123,6 +1401,7 @@ static void Sensor_SendAck(uint8_t type, uint16_t scan_id, uint16_t seq, uint8_t
 static void Sensor_SendNack(uint8_t type, uint16_t scan_id, uint16_t seq, uint8_t status)
 {
   uint8_t payload[2];
+  Sensor_RecordCommandResult(type, scan_id, seq, status, 0U);
   payload[0] = type;
   payload[1] = status;
   (void)Sensor_SendFrame(SENSOR_EVT_NACK, 0U, scan_id, seq, payload, sizeof(payload));
@@ -1141,11 +1420,44 @@ static tBleStatus Sensor_SendReadingFrame(void)
   Sensor_WriteLe16(&payload[offset + 6U], SensorLatestAdcSample);
 
   return Sensor_SendFrame(SENSOR_EVT_SENSOR_READINGS,
+                          MULTI_PROTOCOL_FLAG_ACK_REQUIRED,
                           0U,
-                          0U,
-                          seq,
+                          SensorTransportSeq++,
                           payload,
                           sizeof(payload));
+}
+
+static void Sensor_RecordCommandResult(uint8_t type, uint16_t scan_id,
+                                       uint16_t seq, uint8_t status,
+                                       uint8_t was_ack)
+{
+  if ((type == SENSOR_CMD_SCAN_START) ||
+      (type == SENSOR_CMD_SET_DAC) ||
+      (type == SENSOR_CMD_ABORT))
+  {
+    SensorLastCommandValid = 1U;
+    SensorLastCommandType = type;
+    SensorLastCommandScanId = scan_id;
+    SensorLastCommandSeq = seq;
+    SensorLastCommandStatus = status;
+    SensorLastCommandWasAck = was_ack;
+  }
+}
+
+static uint8_t Sensor_IsDuplicateCommand(uint8_t type, uint16_t scan_id,
+                                         uint16_t seq)
+{
+  return ((SensorLastCommandValid != 0U) &&
+          (SensorLastCommandType == type) &&
+          (SensorLastCommandScanId == scan_id) &&
+          (SensorLastCommandSeq == seq)) ? 1U : 0U;
+}
+
+static uint8_t Sensor_IsBusinessCommand(uint8_t type)
+{
+  return ((type == SENSOR_CMD_SCAN_START) ||
+          (type == SENSOR_CMD_SET_DAC) ||
+          (type == SENSOR_CMD_ABORT)) ? 1U : 0U;
 }
 
 static uint16_t Sensor_Crc16Ccitt(const uint8_t *data, uint16_t length)

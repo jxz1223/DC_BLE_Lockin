@@ -175,10 +175,10 @@
   /*  L2CAP Connection Update request parameters used for test only with smart Phone */
 #define L2CAP_REQUEST_NEW_CONN_PARAM             1
 
-#define L2CAP_INTERVAL_MIN              CONN_P(1000) /* 1s */
-#define L2CAP_INTERVAL_MAX              CONN_P(1000) /* 1s */
+#define L2CAP_INTERVAL_MIN                CONN_P(30) /* 30 ms */
+#define L2CAP_INTERVAL_MAX                CONN_P(50) /* 50 ms */
 #define L2CAP_PERIPHERAL_LATENCY             0x0000
-#define L2CAP_TIMEOUT_MULTIPLIER        0x1F4
+#define L2CAP_TIMEOUT_MULTIPLIER            0x0140 /* 3.2 s */
 
 /* USER CODE BEGIN Specific_Parameters */
 
