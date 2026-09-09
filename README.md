@@ -16,3 +16,7 @@ P-NUCLEO-WB55 板载绿色 LED 现在专用于显示传感器侧蓝牙链路状�
 - `build/Debug/BLE_Custom.elf`
 - `build/Debug/BLE_Custom.hex`
 - `build/Debug/BLE_Custom.bin`
+
+## 四节点连接时序（2026-09-09）
+
+中继统一建立60 ms连接间隔、latency=0、3.2 s监控超时的链路。传感器关闭原示例的按钮触发L2CAP参数切换，避免把中继的共同连接周期改回30/50 ms。即使后续重新启用该演示功能，候选间隔也固定为60 ms。四节点组网及重连验证步骤见工作区`MULTI_NODE_ARCHITECTURE.md`。

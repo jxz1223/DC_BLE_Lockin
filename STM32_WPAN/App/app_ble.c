@@ -220,7 +220,7 @@ Custom_App_ConnHandle_Not_evt_t HandleNotification;
 
 #if (L2CAP_REQUEST_NEW_CONN_PARAM != 0)
 #define SIZE_TAB_CONN_INT            2
-float a_ConnInterval[SIZE_TAB_CONN_INT] = {30, 50}; /* ms */
+float a_ConnInterval[SIZE_TAB_CONN_INT] = {60, 60}; /* Keep relay anchor if re-enabled. */
 uint8_t index_con_int, mutex;
 #endif /* L2CAP_REQUEST_NEW_CONN_PARAM != 0 */
 
