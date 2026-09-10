@@ -23,6 +23,7 @@
 #define MULTI_CMD_ABORT                        0x12U
 #define MULTI_CMD_STREAM_GRANT                 0x14U
 #define MULTI_CMD_FRAME_ACK                    0x15U
+#define MULTI_CMD_RELEASE_LINK                 0x16U /* Relay-local; never sent to sensor. */
 
 #define MULTI_EVT_ACK                          0x80U
 #define MULTI_EVT_NACK                         0x81U

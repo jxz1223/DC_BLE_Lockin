@@ -175,8 +175,8 @@
   /*  L2CAP Connection Update request parameters used for test only with smart Phone */
 #define L2CAP_REQUEST_NEW_CONN_PARAM             0 /* Relay owns multi-link timing. */
 
-#define L2CAP_INTERVAL_MIN                CONN_P(60) /* 60 ms */
-#define L2CAP_INTERVAL_MAX                CONN_P(60) /* 60 ms */
+#define L2CAP_INTERVAL_MIN                CONN_P(100) /* 100 ms */
+#define L2CAP_INTERVAL_MAX                CONN_P(100) /* 100 ms */
 #define L2CAP_PERIPHERAL_LATENCY             0x0000
 #define L2CAP_TIMEOUT_MULTIPLIER            0x0140 /* 3.2 s */
 

@@ -127,7 +127,7 @@ typedef struct
 #define SENSOR_READING_ITEMS_PER_FRAME  1U
 #define SENSOR_READING_ITEM_SIZE        8U
 #define SENSOR_TX_QUEUE_DEPTH           8U
-#define SENSOR_TX_ACK_TIMEOUT_MS        180U
+#define SENSOR_TX_ACK_TIMEOUT_MS        600U /* 100 ms CI, notification + ACK + queue margin. */
 #define SENSOR_TX_MAX_RETRIES           3U
 #define SENSOR_STREAM_CREDIT_LIMIT      8U
 
@@ -344,7 +344,14 @@ void Custom_APP_Notification(Custom_App_ConnHandle_Not_evt_t *pNotification)
       SensorNotifyReady = 0U;
       Custom_App_Context.Tx_char_Notification_Status = 0U;
       SensorStreamCredits = 0U;
+      if (SensorScan.Active != 0U)
+      {
+        /* Manual release or radio loss must not leave a partial scan's DAC
+         * output applied indefinitely. No notification is possible now. */
+        Sensor_DacApply(SensorScan.PreScanDac);
+      }
       SensorScan.Active = 0U;
+      SensorScan.AbortRequested = 0U;
       Sensor_TxReset();
       Connection_Handle = 0U;
       BSP_LED_Off(LED_BLUE);
